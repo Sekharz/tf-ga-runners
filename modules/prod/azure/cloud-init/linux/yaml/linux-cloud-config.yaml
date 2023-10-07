@@ -1,0 +1,233 @@
+#cloud-config
+
+write_files:
+  - encoding: text/plain
+    owner: root:root
+    path: /cleanup_script.sh
+    permissions: '0744'
+    content: |
+      #!/bin/bash -e
+      ACTIONS_USER_ID=$(id -u)
+      docker logout $DOCKER_REGISTRY
+      docker login -u $DOCKER_USERNAME -p $CLEANUP_ARTIFACTORY_TOKEN $DOCKER_REGISTRY
+      docker run -i --rm -v /:/app -w /app $DOCKER_REGISTRY/bash bash -c "rm -rf /app/var/log/audit/*"
+      docker run -i --rm -v /home:/app -w /app $DOCKER_REGISTRY/bash bash -c "chown -R $ACTIONS_USER_ID ./actions"
+      docker run -i --rm -v $HOME:/app -w /app $DOCKER_REGISTRY/bash bash -c "rm -rf ./ssh/* .npmrc .gitconfig artifacts/*"
+      docker run -i --rm -v $PWD:/app -w /app $DOCKER_REGISTRY/bash bash -c "rm -rf .*; rm -rf *"
+      docker logout $DOCKER_REGISTRY
+      docker stop $(docker ps -aq) | true
+      docker system prune --volumes -af
+
+  - encoding: text/plain
+    owner: root:root
+    path: /opt/tooling/setup_ga_runner_azure_ubuntu.sh
+    permissions: '0744'
+    content: |
+      #!/bin/bash -e
+
+      #Setup Before Job Cleanup Script
+
+      printf "Adding cleanup script to runners...\n"
+      chmod +x /cleanup_script.sh
+      echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=/cleanup_script.sh" > /home/actions/.env
+      echo "CLEANUP_ARTIFACTORY_TOKEN=${ARTIFACTORY_TOKEN}" >> /home/actions/.env
+      echo "DOCKER_REGISTRY=${DOCKER_REGISTRY}" >> /home/actions/.env
+      echo "DOCKER_USERNAME=${DOCKER_USERNAME}" >> /home/actions/.env
+      chown actions:actions /home/actions/.env
+
+      printf "Starting setup script for $hostname.\n"
+
+      if [ ! -d "/home/actions" ];
+      then
+          mkdir /home/actions
+      fi
+
+      cd /home/actions
+
+      printf "Checking for GitHub runner Token, if exists remove else generate it...\n"
+      if [ -f ".gh_token" ]
+      then
+        ./svc.sh stop
+        ./svc.sh uninstall
+        TOKEN=`curl -s -H "Authorization: token ${RUNNER_TOKEN}" -X POST -H "Accept: application/vnd.github+json" https://api.github.com/enterprises/${ENT}/actions/runners/remove-token | jq -r .token`
+        printf "Removing GH runner token..."
+        su actions -c "./config.sh remove --token $TOKEN"
+        rm -rf .gh_token
+      fi
+
+      if [ ! -f ".gh_token" ]
+      then
+        printf "Adding runner token..."
+        TOKEN=`curl -s -H "Authorization: token ${RUNNER_TOKEN}" -X POST -H "Accept: application/vnd.github+json" https://api.github.com/enterprises/${ENT}/actions/runners/registration-token | jq -r .token`
+        su actions -c "./config.sh --url https://github.com/enterprises/${ENT} --token $TOKEN --unattended --runnergroup ${RUNNER_GROUP} --name `hostname` --labels ${LABELS},`hostname` --replace"
+        printf "Setting up actions...\n"
+        ./svc.sh install actions
+        echo $TOKEN > .gh_token
+      fi
+      printf "Starting runner service...\n"
+      ./svc.sh start
+
+      printf "\nEnd of runner setup script for $hostname.\n"
+
+  - encoding: text/plain
+    owner: root:root
+    path: /opt/tooling/remove_ga_runner_azure_ubuntu.sh
+    permissions: '0744'
+    content: |
+      #!/bin/bash -e
+      cd /home/actions
+      ./svc.sh stop
+      ./svc.sh uninstall
+      TOKEN=`curl -s -H "Authorization: token ${RUNNER_TOKEN}" -X POST -H "Accept: application/vnd.github+json" https://api.github.com/enterprises/${ENT}/actions/runners/remove-token | jq -r .token`
+      printf "Removing GH runner token..."
+      su actions -c "./config.sh remove --token $TOKEN"
+      rm -rf .gh_token
+
+  - encoding: text/plain
+    owner: root:root
+    path: /etc/systemd/system/cloudinit_set_github_action.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Setup Github Action
+      Requires=network-online.target dbus.socket
+      After=dbus.socket network-online.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/opt/tooling/setup_ga_runner_azure_ubuntu.sh
+      ExecStop=/opt/tooling/remove_ga_runner_azure_ubuntu.sh
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - printf "Creating /dev/sdc... \n"
+  - pvcreate /dev/sdc
+  - printf "Checking creation status...\n"
+  - pvdisplay
+  - printf "\n\n"
+  - lsblk
+  - printf "\n"
+
+  - printf "Creating volume group datavg in /dev/sdc... \n"
+  - vgcreate datavg /dev/sdc
+  - printf "Checking creation of volume group datavg... \n"
+  - vgdisplay
+  - printf "\n"
+
+  - printf "Creating logical volume docker... \n"
+  - lvcreate -L+50G datavg -n docker
+  - printf "Checking creation of logical volume docker... \n"
+  - lvdisplay
+  - printf "\n"
+
+  - printf "Creating logical volume actions... \n"
+  - lvcreate -L+200G datavg -n actions
+  - printf "Checking creation of logical volume actions... \n"
+  - lvdisplay
+  - printf "\n"
+
+  - printf "Creating file system datavg-docker and datavg-actions... \n"
+  - mkfs.xfs -f /dev/mapper/datavg-docker
+  - mkfs.xfs -f /dev/mapper/datavg-actions #end creation of disks
+  - printf "\n"
+
+  - printf "Creating folders for docker and actions... \n"
+  - mkdir -p /var/lib/docker
+  - mkdir -p /home/actions
+  - printf "Checking folder creation... \n"
+  - ls -al /var/lib/ | grep docker
+  - printf "\n"
+  - ls -al /home/ | grep actions
+  - printf "\n"
+
+  - printf "Add logical volumes to fstab and mount them... \n"
+  - echo '/dev/mapper/datavg-docker /var/lib/docker xfs defaults 0 2' >> /etc/fstab
+  - echo '/dev/mapper/datavg-actions /home/actions xfs defaults 0 2' >> /etc/fstab
+  - mount -a  #end mounting of disks
+  - printf "Checking fstab info... \n"
+  - cat /etc/fstab
+  - printf "Checking mount status... \n"
+  - df -h
+  - printf "\n"
+
+  - printf "Add a new group kvm... \n"
+  - groupadd kvm
+  - printf "Check addition of new group... \n"
+  - cat /etc/group | grep kvm
+  - printf "\n"
+
+  - printf "Add a new user actions... \n"
+  - useradd -m -u 994 actions
+  - printf "Check addition of new user actions... \n"
+  - cat /etc/passwd | grep actions
+
+  - printf "Add actions to kvm and change group of /dev/kvm to group kvm... \n"
+  - echo 'KERNEL=="kvm", GROUP="kvm", MODE="0660"' >> /lib/udev/rules.d/50-udev-default.rules
+  - usermod -a -G kvm actions
+  - chgrp kvm /dev/kvm
+  - chmod 660 /dev/kvm
+  - printf "\n"
+
+  - printf "Apt update and remove docker, reinstall, add actions to docker and start docker... \n"
+  - apt update
+  - printf "\n\n"
+  - printf "Remove docker from system... \n"
+  - apt remove docker docker-engine docker.io containerd runc -y
+  - printf "\n\n APT update... \n"
+  - apt update
+  - printf "apt install ca-certs curl gnupg and lsb-release... \n"
+  - apt install ca-certificates curl gnupg lsb-release -y
+  - printf "\n\n Create directory for keyring... \n"
+  - mkdir -m 0755 -p /etc/apt/keyrings
+  - printf "Verify folder creation... \n"
+  - ls -al /etc/apt/
+  - printf "\n\n Curl the repo keys.. \n"
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  - printf "Verify keyring info... \n"
+  - cat /etc/apt/keyrings/docker.gpg
+  - printf "\n\n Add sources to sources list... \n"
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  - printf "Check sources list... \n"
+  - cat /etc/apt/sources.list.d/docker.list
+  - printf "\n\n apt update... \n"
+  - apt update
+  - printf "Install docker... \n"
+  - apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin jq
+  - printf "\n Add actions to docker group... \n"
+  - usermod -a -G docker actions
+  - printf "\n Start docker... \n"
+  - systemctl start docker
+  - systemctl enable docker #end enabling docker
+  - printf "check docker status... \n"
+  - docker info
+  - printf "\n"
+
+  - printf "Downloading runner setup file... \n"
+  - curl -o /home/actions/actions-runner-linux-x64-${runner_version}.tar.gz -L https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz
+  - printf "Checking download... \n"
+  - ls -al /home/actions
+  - printf "\n"
+
+  - printf "unarchiving the tar file and making actions the owner of all the file... \n"
+  - tar xzf /home/actions/actions-runner-linux-x64-${runner_version}.tar.gz -C /home/actions
+  - chown -R actions /home/actions
+  - printf "Checking the status of unarchive... \n"
+  - ls -al /home/actions/
+  - printf "\n"
+
+  - printf "Install runner dependencies... \n"
+  - /home/actions/bin/installdependencies.sh
+
+  - printf "Installing git... \n"
+  - apt -y install git #end installing actions runner
+  - printf "Checking git version... \n"
+  - git --version
+  - printf "\n"
+
+  - printf "Installation Complete -- Logout and Log back"
+  
+  - printf "Starting runner installation... \n"
+  - systemctl daemon-reload
+  - systemctl enable cloudinit_set_github_action.service
+  - systemctl start --no-block cloudinit_set_github_action.service
