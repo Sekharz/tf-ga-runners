@@ -130,8 +130,8 @@ module "az_linux_vm_cloud_init" {
   RUNNER_GROUP      = var.RUNNER_GROUP
   LABELS            = var.LABELS
   enterprise        = var.enterprise
-  DOCKER_REGISTRY = var.DOCKER_REGISTRY
-  DOCKER_USERNAME = var.DOCKER_USERNAME
+  DOCKER_REGISTRY   = var.DOCKER_REGISTRY
+  DOCKER_USERNAME   = var.DOCKER_USERNAME
 }
 
 resource "azurerm_linux_virtual_machine_scale_set" "az_linux_vmss" {

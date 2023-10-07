@@ -12,8 +12,8 @@ data "cloudinit_config" "az_linux_vm_cloud_config" {
       LABELS            = var.LABELS,
       RUNNER_GROUP      = var.RUNNER_GROUP,
       ENT               = var.enterprise,
-      DOCKER_REGISTRY = var.DOCKER_REGISTRY,
-      DOCKER_USERNAME = var.DOCKER_USERNAME
+      DOCKER_REGISTRY   = var.DOCKER_REGISTRY,
+      DOCKER_USERNAME   = var.DOCKER_USERNAME
     })
   }
 }

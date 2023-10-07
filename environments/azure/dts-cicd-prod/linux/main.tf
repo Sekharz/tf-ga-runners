@@ -37,6 +37,6 @@ module "az_linux_vms" {
   enterprise                                 = var.enterprise
   SUB2_rg_name                               = var.SUB2_rg_name
   SUB2_sig_name                              = var.SUB2_sig_name
-  DOCKER_REGISTRY = var.DOCKER_REGISTRY
-  DOCKER_USERNAME = var.DOCKER_USERNAME
+  DOCKER_REGISTRY                            = var.DOCKER_REGISTRY
+  DOCKER_USERNAME                            = var.DOCKER_USERNAME
 }
